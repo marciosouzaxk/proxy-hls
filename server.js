@@ -1,76 +1,98 @@
 const http = require("http");
-const https = require("https");
 
 const PORT = process.env.PORT || 10000;
 const ORIGIN = "http://189.75.136.46:8000";
-const ORIGIN_HOST = "189.75.136.46";
 
-function proxyUrl(url) {
-  return "/proxy?url=" + encodeURIComponent(url);
-}
+function proxy(url, req, res) {
+  const u = new URL(url);
 
-function rewritePlaylist(text, baseUrl) {
-  return text.split(/\r?\n/).map((line) => {
-    if (!line.trim()) return line;
+  const r = http.request({
+    hostname: u.hostname,
+    port: u.port,
+    path: u.pathname + u.search,
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Referer": ORIGIN + "/",
+      "Range": req.headers.range || ""
+    }
+  }, response => {
 
-    // Tags HLS que possuem URI="..."
-    if (line.startsWith("#")) {
-      return line.replace(/URI="([^"]+)"/g, (match, uri) => {
-        const absolute = new URL(uri, baseUrl).toString();
-        return `URI="${proxyUrl(absolute)}"`;
+    let type = response.headers["content-type"] || "";
+
+    if (u.pathname.endsWith(".m3u8") || type.includes("mpegurl")) {
+      let data = "";
+
+      response.setEncoding("utf8");
+
+      response.on("data", x => data += x);
+
+      response.on("end", () => {
+        data = data.split(/\r?\n/).map(line => {
+
+          if (!line || line.startsWith("#")) {
+            return line.replace(/URI="([^"]+)"/g, (m, x) =>
+              `URI="/proxy?url=${encodeURIComponent(new URL(x, u).href)}"`
+            );
+          }
+
+          return "/proxy?url=" +
+            encodeURIComponent(new URL(line, u).href);
+
+        }).join("\n");
+
+        res.writeHead(response.statusCode || 200, {
+          "Content-Type": "application/vnd.apple.mpegurl",
+          "Access-Control-Allow-Origin": "*"
+        });
+
+        res.end(data);
       });
+
+      return;
     }
 
-    // Segmentos ou sub-playlists
-    const absolute = new URL(line.trim(), baseUrl).toString();
-    return proxyUrl(absolute);
-  }).join("\n");
+    res.writeHead(response.statusCode || 200, {
+      "Content-Type": type || "application/octet-stream",
+      "Access-Control-Allow-Origin": "*"
+    });
+
+    response.pipe(res);
+  });
+
+  r.on("error", e => {
+    res.writeHead(502, {
+      "Access-Control-Allow-Origin": "*"
+    });
+
+    res.end("Erro: " + e.message);
+  });
+
+  r.end();
 }
 
-function fetchOrigin(urlString, req, res) {
-  let target;
+const server = http.createServer((req, res) => {
 
-  try {
-    target = new URL(urlString);
-  } catch {
-    res.writeHead(400, {
-      "Content-Type": "text/plain",
-      "Access-Control-Allow-Origin": "*"
+  if (req.url === "/health") {
+    res.writeHead(200, {
+      "Content-Type": "text/plain"
     });
-    return res.end("URL inválida");
+
+    return res.end("PROXY HLS ONLINE");
   }
 
-  // Permite somente o servidor da playlist
-  if (
-    target.hostname !== ORIGIN_HOST ||
-    !["http:", "https:"].includes(target.protocol)
-  ) {
-    res.writeHead(403, {
-      "Content-Type": "text/plain",
-      "Access-Control-Allow-Origin": "*"
-    });
-    return res.end("Origem não permitida");
+  if (req.url === "/" || req.url === "/playlist.m3u8") {
+    return proxy(ORIGIN + "/playlist.m3u8", req, res);
   }
 
-  const client = target.protocol === "https:" ? https : http;
-
-  const headers = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "*/*",
-    "Referer": ORIGIN + "/"
-  };
-
-  // Suporte a requisições por faixa
-  if (req.headers.range) {
-    headers.Range = req.headers.range;
+  if (req.url.startsWith("/proxy?url=")) {
+    const u = new URL(req.url, "http://localhost");
+    return proxy(u.searchParams.get("url"), req, res);
   }
 
-  const request = client.request({
-    hostname: target.hostname,
-    port: target.port || (target.protocol === "https:" ? 443 : 80),
-    path: target.pathname + target.search,
-    method: "GET",
-    headers
-  }, (response) => {
+  res.writeHead(404);
+  res.end("Not Found");
+});
 
-   
+server.listen(PORT, "0.0.0.0", () => {
+  console.log("PROXY HLS ONLINE");
+});
