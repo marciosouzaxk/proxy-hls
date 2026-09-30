@@ -1,70 +1,76 @@
 const http = require("http");
+const https = require("https");
 
 const PORT = process.env.PORT || 10000;
-const SOURCE = "http://189.75.136.46:8000/playlist.m3u8";
+const ORIGIN = "http://189.75.136.46:8000";
+const ORIGIN_HOST = "189.75.136.46";
 
-const server = http.createServer((req, res) => {
+function proxyUrl(url) {
+  return "/proxy?url=" + encodeURIComponent(url);
+}
 
-  // Teste do servidor
-  if (req.url === "/health") {
-    res.writeHead(200, {
+function rewritePlaylist(text, baseUrl) {
+  return text.split(/\r?\n/).map((line) => {
+    if (!line.trim()) return line;
+
+    // Tags HLS que possuem URI="..."
+    if (line.startsWith("#")) {
+      return line.replace(/URI="([^"]+)"/g, (match, uri) => {
+        const absolute = new URL(uri, baseUrl).toString();
+        return `URI="${proxyUrl(absolute)}"`;
+      });
+    }
+
+    // Segmentos ou sub-playlists
+    const absolute = new URL(line.trim(), baseUrl).toString();
+    return proxyUrl(absolute);
+  }).join("\n");
+}
+
+function fetchOrigin(urlString, req, res) {
+  let target;
+
+  try {
+    target = new URL(urlString);
+  } catch {
+    res.writeHead(400, {
       "Content-Type": "text/plain",
       "Access-Control-Allow-Origin": "*"
     });
-    return res.end("PROXY HLS ONLINE");
+    return res.end("URL inválida");
   }
 
-  // Rota da playlist HLS
-  if (req.url === "/" || req.url === "/playlist.m3u8") {
-
-    const target = new URL(SOURCE);
-
-    const options = {
-      hostname: target.hostname,
-      port: target.port,
-      path: target.pathname + target.search,
-      method: "GET",
-      headers: {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "*/*",
-        "Referer": "http://189.75.136.46:8000/"
-      }
-    };
-
-    const request = http.request(options, (response) => {
-
-      res.writeHead(response.statusCode || 502, {
-        "Content-Type":
-          response.headers["content-type"] ||
-          "application/vnd.apple.mpegurl",
-        "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "no-cache"
-      });
-
-      response.pipe(res);
+  // Permite somente o servidor da playlist
+  if (
+    target.hostname !== ORIGIN_HOST ||
+    !["http:", "https:"].includes(target.protocol)
+  ) {
+    res.writeHead(403, {
+      "Content-Type": "text/plain",
+      "Access-Control-Allow-Origin": "*"
     });
-
-    request.on("error", (error) => {
-      res.writeHead(502, {
-        "Content-Type": "text/plain",
-        "Access-Control-Allow-Origin": "*"
-      });
-
-      res.end("Erro na origem: " + error.message);
-    });
-
-    request.end();
-    return;
+    return res.end("Origem não permitida");
   }
 
-  res.writeHead(404, {
-    "Content-Type": "text/plain",
-    "Access-Control-Allow-Origin": "*"
-  });
+  const client = target.protocol === "https:" ? https : http;
 
-  res.end("Not Found");
-});
+  const headers = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "*/*",
+    "Referer": ORIGIN + "/"
+  };
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log("Proxy HLS ativo na porta " + PORT);
-});
+  // Suporte a requisições por faixa
+  if (req.headers.range) {
+    headers.Range = req.headers.range;
+  }
+
+  const request = client.request({
+    hostname: target.hostname,
+    port: target.port || (target.protocol === "https:" ? 443 : 80),
+    path: target.pathname + target.search,
+    method: "GET",
+    headers
+  }, (response) => {
+
+   
